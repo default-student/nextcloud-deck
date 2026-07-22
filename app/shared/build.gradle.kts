@@ -8,12 +8,12 @@ java {
 }
 
 dependencies {
-    implementation(project(":domain:usecases"))
-    implementation(project(":domain:model"))
-    implementation(project(":data:local"))
-    implementation(project(":data:remote"))
-    implementation(project(":data:repository"))
-    implementation(project(":data:sync"))
+    api(project(":domain:usecases"))
+    api(project(":domain:model"))
+    api(project(":data:local"))
+    api(project(":data:remote"))
+    api(project(":data:repository"))
+    api(project(":data:sync"))
     api(project(":auth:apptoken"))
 
     api(libs.dagger)
