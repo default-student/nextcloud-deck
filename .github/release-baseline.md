@@ -1,0 +1,1 @@
+The initial customized source is commit `1aae9c476`. It includes upstream development history beyond the latest known version tag `1.26.3`, so this release is not represented as a build solely from that older tag.

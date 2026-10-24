@@ -1,0 +1,3 @@
+- Per-board reminders with configurable lead time and notification controls.
+- Reminder scheduling and snoozing, including startup recovery and lock-screen notifications.
+- Private release signing support for the fork.

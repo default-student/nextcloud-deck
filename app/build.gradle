@@ -15,8 +15,7 @@ android {
         applicationId "it.niedermann.nextcloud.deck"
         minSdk 24
         targetSdk 37
-        // Give this separately signed fork its own monotonically increasing update channel.
-        versionCode 1027000 + (System.getenv('DECK_VERSION_CODE_OFFSET') ?: '0').toInteger()
+        versionCode 1027000
         versionName "1.27.0"
         vectorDrawables.useSupportLibrary true
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -87,6 +86,24 @@ android {
     lint {
         abortOnError false
         disable 'MissingTranslation'
+    }
+}
+
+// Keep fork release metadata separate from upstream's version declarations so
+// ordinary upstream version bumps remain clean three-way merges.
+android {
+    defaultConfig {
+        def forkVersionCode = System.getenv('DECK_RELEASE_VERSION_CODE')
+        if (forkVersionCode) {
+            versionCode = forkVersionCode.toInteger()
+        } else {
+            def versionCodeOffset = (System.getenv('DECK_VERSION_CODE_OFFSET') ?: '0').toInteger()
+            versionCode = versionCode + versionCodeOffset
+        }
+        def forkVersionName = System.getenv('DECK_RELEASE_VERSION_NAME')
+        if (forkVersionName) {
+            versionName = forkVersionName
+        }
     }
 }
 

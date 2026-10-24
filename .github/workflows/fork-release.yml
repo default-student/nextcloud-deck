@@ -1,0 +1,382 @@
+name: Build and publish customized Nextcloud Deck
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '13 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nextcloud-deck-fork-release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  resolve-source:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      skip: ${{ steps.resolve.outputs.skip }}
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+      upstream_sha: ${{ steps.resolve.outputs.upstream_sha }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      version_name: ${{ steps.resolve.outputs.version_name }}
+      version_code: ${{ steps.resolve.outputs.version_code }}
+      release_exists: ${{ steps.resolve.outputs.release_exists }}
+      upstream_body_b64: ${{ steps.resolve.outputs.upstream_body_b64 }}
+      local_commits_b64: ${{ steps.resolve.outputs.local_commits_b64 }}
+      features_b64: ${{ steps.resolve.outputs.features_b64 }}
+      baseline_b64: ${{ steps.resolve.outputs.baseline_b64 }}
+      source_basis: ${{ steps.resolve.outputs.source_basis }}
+    steps:
+      - name: Check out the triggering source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || 'master' }}
+          fetch-depth: 0
+
+      - name: Resolve source, upstream release notes, and stable release identity
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          UPSTREAM_REPOSITORY: stefan-niedermann/nextcloud-deck
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch upstream '+refs/heads/master:refs/remotes/upstream/master' '+refs/tags/*:refs/tags/upstream/*'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [[ "$EVENT_NAME" == 'push' ]]; then
+            branch_sha="$(git ls-remote origin refs/heads/master | awk 'NR == 1 {print $1}')"
+            if [[ -n "$branch_sha" && "$branch_sha" != "$(git rev-parse HEAD)" ]] && git merge-base --is-ancestor HEAD "$branch_sha"; then
+              echo 'skip=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          baseline="$(tr -d '\r\n' < .github/upstream-release-tag)"
+          source_basis='Fork master source.'
+          upstream_body=''
+          upstream_tag="$baseline"
+          upstream_sha="$(git rev-parse "refs/tags/upstream/${baseline}^{commit}")"
+          pending_file=.github/pending-upstream-release.json
+
+          if [[ "$EVENT_NAME" == 'schedule' ]]; then
+            python3 - "$RUNNER_TEMP/upstream-candidates.json" <<'PY'
+          import json, re, subprocess, sys
+          from pathlib import Path
+          values = []
+          refs = subprocess.check_output(['git', 'for-each-ref', '--format=%(refname:strip=3)', 'refs/tags/upstream'], text=True).splitlines()
+          for tag in refs:
+              if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', tag):
+                  continue
+              version_code = ''
+              try:
+                  gradle = subprocess.check_output(['git', 'show', f'refs/tags/upstream/{tag}:app/build.gradle'], text=True, stderr=subprocess.DEVNULL)
+                  match = re.search(r'\bversionCode\s+([0-9_]+)', gradle)
+                  if match: version_code = match.group(1).replace('_', '')
+              except subprocess.CalledProcessError:
+                  pass
+              body = ''
+              if version_code:
+                  try:
+                      body = subprocess.check_output(['git', 'show', f'refs/tags/upstream/{tag}:fastlane/metadata/android/en-US/changelogs/{version_code}.txt'], text=True, stderr=subprocess.DEVNULL)
+                  except subprocess.CalledProcessError:
+                      pass
+              if not body:
+                  body = subprocess.check_output(['git', 'show', '-s', '--format=%B', f'refs/tags/upstream/{tag}'], text=True).strip()
+              values.append({'tag_name': tag, 'body': body or f'No upstream changelog was published for {tag}.'})
+          Path(sys.argv[1]).write_text(json.dumps(values))
+          PY
+            selection="$(python3 .github/scripts/resolve_upstream_release.py --baseline "$baseline" --candidates "$RUNNER_TEMP/upstream-candidates.json")"
+            printf '%s' "$selection" > "$RUNNER_TEMP/upstream-selection.json"
+            chosen="$(jq -c '.selected // empty' <<<"$selection")"
+            decision="$(python3 - "$EVENT_NAME" "$selection" "$pending_file" <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, '.github/scripts')
+          from resolve_upstream_release import schedule_action
+          print(schedule_action(sys.argv[1], json.loads(sys.argv[2]), Path(sys.argv[3]).exists()))
+          PY
+          )"
+            if [[ "$decision" == 'skip-no-change' ]]; then
+              echo 'skip=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ -n "$chosen" ]]; then
+              upstream_tag="$(jq -r '.tag_name' <<<"$chosen")"
+              upstream_sha="$(git rev-parse "refs/tags/upstream/${upstream_tag}^{commit}")"
+              pending_notes_file="$RUNNER_TEMP/pending-upstream-notes.md"
+              : > "$pending_notes_file"
+              if [[ -f "$pending_file" ]]; then
+                prior_result="$(curl --silent --show-error -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+                prior_status="${prior_result##*$'\n'}"
+                prior_json="${prior_result%$'\n'*}"
+                [[ "$prior_status" == '200' ]] || { echo "Fork release listing failed with HTTP ${prior_status}; refusing to advance pending upstream notes." >&2; exit 1; }
+                printf '%s' "$prior_json" > "$RUNNER_TEMP/prior-fork-releases.json"
+                python3 - "$pending_file" "$RUNNER_TEMP/prior-fork-releases.json" "$pending_notes_file" <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, '.github/scripts')
+          from resolve_upstream_release import unpublished_pending_notes
+          pending = json.loads(Path(sys.argv[1]).read_text())
+          releases = json.loads(Path(sys.argv[2]).read_text())
+          Path(sys.argv[3]).write_text(unpublished_pending_notes(pending, releases, 'nextcloud-deck-fork.apk'))
+          PY
+              fi
+              upstream_body="$(python3 - "$RUNNER_TEMP/upstream-selection.json" "$pending_notes_file" <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, '.github/scripts')
+          from resolve_upstream_release import aggregate_release_notes
+          pending = Path(sys.argv[2]).read_text() if Path(sys.argv[2]).exists() else ''
+          selection = json.loads(Path(sys.argv[1]).read_text())
+          print(aggregate_release_notes(pending, selection['incorporated']), end='')
+          PY
+          )"
+              python3 - "$pending_file" "$upstream_tag" "$upstream_body" <<'PY'
+          import json, sys
+          from pathlib import Path
+          Path(sys.argv[1]).write_text(json.dumps({'tag': sys.argv[2], 'body': sys.argv[3], 'prerelease': False}, ensure_ascii=False) + '\n')
+          PY
+              git merge --no-edit "$upstream_sha"
+              printf '%s\n' "$upstream_tag" > .github/upstream-release-tag
+              git add .github/upstream-release-tag "$pending_file"
+              git commit -m "chore: integrate upstream release ${upstream_tag}"
+              git push origin HEAD:refs/heads/master
+              source_basis="Integrated exact upstream version tag ${upstream_tag}."
+            elif [[ -f "$pending_file" ]]; then
+              upstream_tag="$(jq -r '.tag' "$pending_file")"
+              upstream_sha="$(git rev-parse "refs/tags/upstream/${upstream_tag}^{commit}")"
+              upstream_body="$(jq -r '.body' "$pending_file")"
+              source_basis="Retrying pending upstream release ${upstream_tag}."
+            else
+              echo 'skip=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          elif [[ -f "$pending_file" ]]; then
+            upstream_tag="$(jq -r '.tag' "$pending_file")"
+            upstream_sha="$(git rev-parse "refs/tags/upstream/${upstream_tag}^{commit}")"
+            upstream_body="$(jq -r '.body' "$pending_file")"
+            source_basis="Fork master source; pending upstream release ${upstream_tag}."
+          else
+            upstream_body="This is a customized development snapshot. The initial source includes upstream development beyond the known version tag 1.26.3, and is not represented as a build solely from that older tag."
+            source_basis='Initial development snapshot based on customized master; not a build solely from tag 1.26.3.'
+          fi
+
+          source_sha="$(git rev-parse HEAD)"
+          releases_result="$(curl --silent --show-error -w '\n%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          releases_status="${releases_result##*$'\n'}"
+          releases_json="${releases_result%$'\n'*}"
+          [[ "$releases_status" == '200' ]] || { echo "Fork release listing failed with HTTP ${releases_status}." >&2; exit 1; }
+          printf '%s' "$releases_json" > "$RUNNER_TEMP/releases.json"
+          existing="$(python3 - "$source_sha" "$RUNNER_TEMP/releases.json" <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, '.github/scripts')
+          from resolve_upstream_release import find_source_release
+          match = find_source_release(json.loads(Path(sys.argv[2]).read_text()), sys.argv[1], 'nextcloud-deck-fork.apk')
+          print(json.dumps(match) if match else '')
+          PY
+          )"
+          if [[ -n "$existing" && "$(jq -r '.asset_present' <<<"$existing")" == 'true' ]]; then
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          release_exists=false
+          serial=''
+          version_code=''
+          if [[ -n "$existing" ]]; then
+            release_exists=true
+            release_tag="$(jq -r '.tag_name' <<<"$existing")"
+            version_name="${release_tag#v}"
+            version_code="$(jq -r '.body' <<<"$existing" | sed -n 's/^Android versionCode: \([0-9]*\)$/\1/p' | head -n1)"
+            [[ -n "$version_code" ]] || { echo 'Existing release lacks its Android versionCode metadata.' >&2; exit 1; }
+          else
+            base_version="$(python3 - app/build.gradle <<'PY'
+          import re, sys
+          source = open(sys.argv[1], encoding='utf-8').read()
+          match = re.search(r'^\s*versionName\s+[\"\']([^\"\']+)[\"\']', source, re.M)
+          print(match.group(1) if match else '')
+          PY
+          )"
+            [[ -n "$base_version" ]] || { echo 'Could not resolve app versionName from app/build.gradle.' >&2; exit 1; }
+            base_version="$(python3 - "$base_version" "$upstream_tag" <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, '.github/scripts')
+          from resolve_upstream_release import release_display_version
+          print(release_display_version(sys.argv[1], sys.argv[2]))
+          PY
+          )"
+            versions="$(python3 - "$RUNNER_TEMP/releases.json" "$GITHUB_RUN_NUMBER" <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, '.github/scripts')
+          from resolve_upstream_release import next_release_versions
+          releases = json.loads(Path(sys.argv[1]).read_text())
+          serial, code = next_release_versions(2027000, int(sys.argv[2]), releases)
+          print(f'{serial} {code}')
+          PY
+          )"
+            read -r serial version_code <<<"$versions"
+            version_name="${base_version}-fork.${serial}"
+            release_tag="v${version_name}"
+          fi
+          if [[ -z "$existing" ]]; then
+            previous="$(python3 - "$RUNNER_TEMP/releases.json" <<'PY'
+          import json, sys
+          from pathlib import Path
+          releases = json.loads(Path(sys.argv[1]).read_text())
+          valid = [r for r in releases if not r.get('draft') and r.get('tag_name', '').startswith('v') and '-fork.' in r.get('tag_name', '') and any(a.get('name') == 'nextcloud-deck-fork.apk' for a in r.get('assets', []))]
+          valid.sort(key=lambda r: r.get('published_at') or '')
+          print(valid[-1].get('tag_name', '') if valid else '')
+          PY
+          )"
+            mapfile -t upstream_tag_refs < <(git for-each-ref --format='%(refname)' refs/tags/upstream)
+            if [[ -n "$previous" ]] && git rev-parse --verify "refs/tags/${previous}^{commit}" >/dev/null 2>&1; then
+              local_commits="$(git log --no-merges --format='- %s (%h)' "${previous}..${source_sha}" --not refs/remotes/upstream/master "${upstream_tag_refs[@]}")"
+            else
+              local_commits="$(git log --no-merges --format='- %s (%h)' "$source_sha" --not refs/remotes/upstream/master "${upstream_tag_refs[@]}")"
+            fi
+          else
+            local_commits='Release asset retry; source and notes remain those of the existing release.'
+          fi
+          [[ -n "$local_commits" ]] || local_commits='No new fork-only commits since the previous release.'
+          features="$(cat .github/fork-release-features.md)"
+          baseline_notes="$(cat .github/release-baseline.md)"
+          printf 'skip=false\nsource_sha=%s\nupstream_tag=%s\nupstream_sha=%s\nrelease_tag=%s\nversion_name=%s\nversion_code=%s\nrelease_exists=%s\nsource_basis=%s\n' "$source_sha" "$upstream_tag" "$upstream_sha" "$release_tag" "$version_name" "$version_code" "$release_exists" "$source_basis" >> "$GITHUB_OUTPUT"
+          printf 'upstream_body_b64=%s\nlocal_commits_b64=%s\nfeatures_b64=%s\nbaseline_b64=%s\n' "$(printf '%s' "$upstream_body" | base64 -w0)" "$(printf '%s' "$local_commits" | base64 -w0)" "$(printf '%s' "$features" | base64 -w0)" "$(printf '%s' "$baseline_notes" | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+  build-unsigned:
+    needs: resolve-source
+    if: needs.resolve-source.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the immutable release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.resolve-source.outputs.source_sha }}
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - name: Build unsigned APK from the release source
+        env:
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+          DECK_RELEASE_VERSION_NAME: ${{ needs.resolve-source.outputs.version_name }}
+          DECK_RELEASE_VERSION_CODE: ${{ needs.resolve-source.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          ./gradlew assembleFdroidRelease --no-configuration-cache
+      - name: Verify unsigned APK identity and metadata
+        env:
+          EXPECTED_VERSION_NAME: ${{ needs.resolve-source.outputs.version_name }}
+          EXPECTED_VERSION_CODE: ${{ needs.resolve-source.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/fdroid/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -s "$apk"
+          signer="$(find "${ANDROID_HOME}/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -n1)"
+          if "$signer" verify "$apk" >/dev/null 2>&1; then echo 'Expected an unsigned APK.' >&2; exit 1; fi
+          analyzer="$(find "${ANDROID_HOME}" -type f -name apkanalyzer -print -quit)"
+          test "$("$analyzer" manifest application-id "$apk")" = 'it.niedermann.nextcloud.deck'
+          test "$("$analyzer" manifest version-name "$apk")" = "$EXPECTED_VERSION_NAME"
+          test "$("$analyzer" manifest version-code "$apk")" = "$EXPECTED_VERSION_CODE"
+          cp "$apk" "$RUNNER_TEMP/nextcloud-deck-unsigned.apk"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: nextcloud-deck-unsigned
+          path: ${{ runner.temp }}/nextcloud-deck-unsigned.apk
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-and-publish:
+    needs: [resolve-source, build-unsigned]
+    if: needs.resolve-source.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: nextcloud-deck-unsigned
+          path: ${{ runner.temp }}/unsigned
+      - name: Sign and verify the APK
+        env:
+          DECK_KEYSTORE_BASE64: ${{ secrets.DECK_KEYSTORE_BASE64 }}
+          DECK_KEYSTORE_PASSWORD: ${{ secrets.DECK_KEYSTORE_PASSWORD }}
+          DECK_KEY_PASSWORD: ${{ secrets.DECK_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DECK_KEYSTORE_BASE64:?Missing DECK_KEYSTORE_BASE64 secret}"
+          : "${DECK_KEYSTORE_PASSWORD:?Missing DECK_KEYSTORE_PASSWORD secret}"
+          : "${DECK_KEY_PASSWORD:?Missing DECK_KEY_PASSWORD secret}"
+          key="$RUNNER_TEMP/deck-release.jks"
+          printf '%s' "$DECK_KEYSTORE_BASE64" | base64 --decode > "$key"
+          chmod 600 "$key"
+          signer="$(find "${ANDROID_HOME}/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -n1)"
+          analyzer="$(find "${ANDROID_HOME}" -type f -name apkanalyzer -print -quit)"
+          "$signer" sign --ks "$key" --ks-key-alias deck-release --ks-pass env:DECK_KEYSTORE_PASSWORD --key-pass env:DECK_KEY_PASSWORD --out "$RUNNER_TEMP/nextcloud-deck-fork.apk" "$RUNNER_TEMP/unsigned/nextcloud-deck-unsigned.apk"
+          "$signer" verify --verbose "$RUNNER_TEMP/nextcloud-deck-fork.apk"
+          test "$("$analyzer" manifest application-id "$RUNNER_TEMP/nextcloud-deck-fork.apk")" = 'it.niedermann.nextcloud.deck'
+      - name: Publish release notes and APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_EXISTS: ${{ needs.resolve-source.outputs.release_exists }}
+          RELEASE_TAG: ${{ needs.resolve-source.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
+          UPSTREAM_TAG: ${{ needs.resolve-source.outputs.upstream_tag }}
+          UPSTREAM_SHA: ${{ needs.resolve-source.outputs.upstream_sha }}
+          VERSION_NAME: ${{ needs.resolve-source.outputs.version_name }}
+          VERSION_CODE: ${{ needs.resolve-source.outputs.version_code }}
+          SOURCE_BASIS: ${{ needs.resolve-source.outputs.source_basis }}
+          UPSTREAM_BODY_B64: ${{ needs.resolve-source.outputs.upstream_body_b64 }}
+          LOCAL_COMMITS_B64: ${{ needs.resolve-source.outputs.local_commits_b64 }}
+          FEATURES_B64: ${{ needs.resolve-source.outputs.features_b64 }}
+          BASELINE_B64: ${{ needs.resolve-source.outputs.baseline_b64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$UPSTREAM_BODY_B64" | base64 --decode > "$RUNNER_TEMP/upstream-notes.md"
+          printf '%s' "$LOCAL_COMMITS_B64" | base64 --decode > "$RUNNER_TEMP/local-commits.md"
+          printf '%s' "$FEATURES_B64" | base64 --decode > "$RUNNER_TEMP/features.md"
+          printf '%s' "$BASELINE_B64" | base64 --decode > "$RUNNER_TEMP/baseline.md"
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Customized Nextcloud Deck fork build.
+
+          ## Source
+          Fork source commit: \`$SOURCE_SHA\`
+          - $SOURCE_BASIS
+          - Tracked upstream version: [$UPSTREAM_TAG](https://github.com/stefan-niedermann/nextcloud-deck/tree/$UPSTREAM_TAG) at \`$UPSTREAM_SHA\`
+          - Android version: \`$VERSION_NAME\` (versionCode $VERSION_CODE)
+          Android versionCode: $VERSION_CODE
+
+          ## Upstream changelog
+          EOF
+          cat "$RUNNER_TEMP/upstream-notes.md" >> "$RUNNER_TEMP/release-notes.md"
+          printf '\n\n## Fork changes since previous release\n\n' >> "$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/local-commits.md" >> "$RUNNER_TEMP/release-notes.md"
+          printf '\n\n## Persistent fork features\n\n' >> "$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/features.md" >> "$RUNNER_TEMP/release-notes.md"
+          printf '\n\n## Initial fork release baseline\n\n' >> "$RUNNER_TEMP/release-notes.md"
+          cat "$RUNNER_TEMP/baseline.md" >> "$RUNNER_TEMP/release-notes.md"
+          printf '\n\nPackage ID: `it.niedermann.nextcloud.deck`. This APK uses the fork signing key.\n' >> "$RUNNER_TEMP/release-notes.md"
+          if [[ "$RELEASE_EXISTS" == 'true' ]]; then
+            gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/nextcloud-deck-fork.apk" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$RUNNER_TEMP/nextcloud-deck-fork.apk" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "Nextcloud Deck $VERSION_NAME (default-student fork)" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
