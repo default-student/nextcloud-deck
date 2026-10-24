@@ -101,12 +101,12 @@ public class SyncHelper {
                         if (parallel) {
                             provider.goDeeper(SyncHelper.this, existingEntity, entityFromServer, responseCallback);
                         } else {
-                            DeckLog.verbose("### SYNC Sequencial!"+tmp.getId());
+                            DeckLog.verbose("### SYNC sequential start provider=" + provider.getClass().getSimpleName() + " id=" + tmp.getId());
                             CountDownLatch latch = new CountDownLatch(1);
                             provider.goDeeper(SyncHelper.this, existingEntity, entityFromServer, new ResponseCallback<>(responseCallback.getAccount()) {
                                 @Override
                                 public void onResponse(Boolean response, Headers headers) {
-                                    DeckLog.verbose("### SYNC board "+tmp.getId()+" done! Changes: "+response);
+                                    DeckLog.verbose("### SYNC sequential callback provider=" + provider.getClass().getSimpleName() + " id=" + tmp.getId() + " done; changes=" + response);
                                     latch.countDown();
                                 }
 
@@ -119,7 +119,9 @@ public class SyncHelper {
                                 }
                             });
                             try {
+                                DeckLog.verbose("### SYNC sequential waiting provider=" + provider.getClass().getSimpleName() + " id=" + tmp.getId());
                                 latch.await();
+                                DeckLog.verbose("### SYNC sequential released provider=" + provider.getClass().getSimpleName() + " id=" + tmp.getId());
                             } catch (InterruptedException e) {
                                 onError(e);
                             }

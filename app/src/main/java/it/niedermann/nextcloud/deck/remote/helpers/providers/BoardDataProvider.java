@@ -13,6 +13,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import it.niedermann.nextcloud.deck.DeckLog;
 import it.niedermann.nextcloud.deck.database.DataBaseAdapter;
@@ -41,7 +42,10 @@ public class BoardDataProvider extends AbstractSyncDataProvider<FullBoard> {
     private boolean isParallel = true;
     private MutableLiveData<Pair<Integer, Integer>> progress = null;
 
-    private ResponseCallback<Boolean> stepByStepCallback;
+    private volatile ResponseCallback<Boolean> stepByStepCallback;
+    private volatile boolean schedulingChildren;
+    private final AtomicBoolean stepByStepCallbackDelivered = new AtomicBoolean(true);
+    private final AtomicBoolean stepByStepChangedSomething = new AtomicBoolean(false);
 
     public BoardDataProvider() {
         super(null);
@@ -212,6 +216,9 @@ public class BoardDataProvider extends AbstractSyncDataProvider<FullBoard> {
     public void goDeeper(SyncHelper syncHelper, FullBoard existingEntity, FullBoard entityFromServer, ResponseCallback<Boolean> callback) {
         if (!isParallel) {
             stepByStepCallback = callback;
+            schedulingChildren = true;
+            stepByStepCallbackDelivered.set(false);
+            stepByStepChangedSomething.set(false);
         }
         List<Label> labels = entityFromServer.getLabels();
         if (labels != null && !labels.isEmpty()) {
@@ -231,19 +238,38 @@ public class BoardDataProvider extends AbstractSyncDataProvider<FullBoard> {
         if (entityFromServer.getStacks() != null && !entityFromServer.getStacks().isEmpty()) {
             syncHelper.doSyncFor(new StackDataProvider(this, existingEntity));
         }
+
+        if (!isParallel) {
+            schedulingChildren = false;
+            completeStepByStepIfReady();
+        }
     }
 
     @Override
     public void childDone(AbstractSyncDataProvider<?> child, ResponseCallback<Boolean> responseCallback, boolean syncChangedSomething) {
+        if (syncChangedSomething) {
+            stepByStepChangedSomething.set(true);
+        }
+        DeckLog.verbose("[SyncTree] BoardDataProvider child callback: " + child.getClass().getSimpleName() + "; stillGoingDeeper=" + stillGoingDeeper + "; pending=" + pendingChildCount());
         removeChild(child);
-        if (!stillGoingDeeper && children.isEmpty()) {
+        DeckLog.verbose("[SyncTree] BoardDataProvider after child callback: " + child.getClass().getSimpleName() + "; pending=" + pendingChildCount());
+        if (!stillGoingDeeper && !hasPendingChildren()) {
             if (parent != null) {
                 parent.childDone(this, responseCallback, syncChangedSomething);
             } else {
                 responseCallback.onResponse(syncChangedSomething, IResponseCallback.EMPTY_HEADERS);
             }
-        } else if (!isParallel && children.isEmpty()) {
-            stepByStepCallback.onResponse(syncChangedSomething, IResponseCallback.EMPTY_HEADERS);
+        } else {
+            completeStepByStepIfReady();
+        }
+    }
+
+    private void completeStepByStepIfReady() {
+        if (!isParallel && !schedulingChildren && !hasPendingChildren()
+                && stepByStepCallback != null
+                && stepByStepCallbackDelivered.compareAndSet(false, true)) {
+            DeckLog.verbose("[SyncTree] BoardDataProvider all children registered and complete; releasing sequential board callback");
+            stepByStepCallback.onResponse(stepByStepChangedSomething.get(), IResponseCallback.EMPTY_HEADERS);
         }
     }
 

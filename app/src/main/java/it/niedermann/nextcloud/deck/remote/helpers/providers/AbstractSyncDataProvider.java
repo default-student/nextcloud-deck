@@ -22,7 +22,7 @@ public abstract class AbstractSyncDataProvider<T extends IRemoteEntity> {
     @Nullable
     protected final AbstractSyncDataProvider<?> parent;
     protected final List<AbstractSyncDataProvider<?>> children = new ArrayList<>();
-    protected boolean stillGoingDeeper = false;
+    protected volatile boolean stillGoingDeeper = false;
 
     public AbstractSyncDataProvider(@Nullable AbstractSyncDataProvider<?> parent) {
         this.parent = parent;
@@ -72,7 +72,12 @@ public abstract class AbstractSyncDataProvider<T extends IRemoteEntity> {
     }
 
     public void addChild(AbstractSyncDataProvider<?> child) {
-        children.add(child);
+        int pending;
+        synchronized (children) {
+            children.add(child);
+            pending = children.size();
+        }
+        logSyncTree("child added: " + child.getClass().getSimpleName() + "; pending=" + pending);
     }
 
     @SuppressWarnings("UnnecessaryReturnStatement")
@@ -112,8 +117,9 @@ public abstract class AbstractSyncDataProvider<T extends IRemoteEntity> {
     public abstract void deleteOnServer(ServerAdapter serverAdapter, long accountId, ResponseCallback<EmptyResponse> callback, T entity, DataBaseAdapter dataBaseAdapter);
 
     public void childDone(AbstractSyncDataProvider<?> child, ResponseCallback<Boolean> responseCallback, boolean syncChangedSomething) {
+        logSyncTree("child callback: " + child.getClass().getSimpleName() + "; stillGoingDeeper=" + stillGoingDeeper + "; pending=" + pendingChildCount());
         removeChild(child);
-        if (!stillGoingDeeper && children.isEmpty()) {
+        if (!stillGoingDeeper && !hasPendingChildren()) {
             if (parent != null) {
                 parent.childDone(this, responseCallback, syncChangedSomething);
             } else {
@@ -123,12 +129,39 @@ public abstract class AbstractSyncDataProvider<T extends IRemoteEntity> {
     }
 
     protected boolean removeChild(AbstractSyncDataProvider<?> child) {
-        return children.remove(child);
+        boolean removed;
+        int pending;
+        synchronized (children) {
+            removed = children.remove(child);
+            pending = children.size();
+        }
+        logSyncTree("child removed: " + child.getClass().getSimpleName() + "; removed=" + removed + "; pending=" + pending);
+        return removed;
+    }
+
+    protected boolean hasPendingChildren() {
+        synchronized (children) {
+            return !children.isEmpty();
+        }
+    }
+
+    protected int pendingChildCount() {
+        synchronized (children) {
+            return children.size();
+        }
     }
 
     public void doneGoingDeeper(ResponseCallback<Boolean> responseCallback, boolean syncChangedSomething) {
         stillGoingDeeper = false;
+        logSyncTree("done going deeper; pending=" + pendingChildCount());
         childDone(this, responseCallback, syncChangedSomething);
+    }
+
+    private void logSyncTree(String message) {
+        String provider = getClass().getSimpleName();
+        if ("BoardDataProvider".equals(provider) || "StackDataProvider".equals(provider)) {
+            DeckLog.verbose("[SyncTree] " + provider + " " + message);
+        }
     }
 
     public void goingDeeper() {

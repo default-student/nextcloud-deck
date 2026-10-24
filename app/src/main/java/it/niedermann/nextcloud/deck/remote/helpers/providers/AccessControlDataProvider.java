@@ -39,12 +39,14 @@ public class AccessControlDataProvider extends AbstractSyncDataProvider<AccessCo
 
     @Override
     public void getAllFromServer(ServerAdapter serverAdapter, DataBaseAdapter dataBaseAdapter, long accountId, ResponseCallback<List<AccessControl>> responder, Instant lastSync) {
+        DeckLog.verbose("[SyncTree] AccessControl waiting for participant lookups=" + acl.size());
         AsyncUtil.awaitAsyncWork(acl.size(), latch -> {
             for (AccessControl accessControl : acl) {
                 if (TYPE_GROUP.equals(accessControl.getType())) {
                     serverAdapter.searchGroupMembers(accessControl.getUser().getUid(), new ResponseCallback<>(responder.getAccount()) {
                         @Override
                         public void onResponse(GroupMemberUIDs response, Headers headers) {
+                            DeckLog.verbose("[SyncTree] AccessControl group lookup returned; members=" + response.getUids().size());
                             accessControl.setGroupMemberUIDs(response);
                             if (response.getUids().size() > 0) {
                                 ensureGroupMembersInDB(responder.getAccount(), dataBaseAdapter, serverAdapter, response);
@@ -54,6 +56,7 @@ public class AccessControlDataProvider extends AbstractSyncDataProvider<AccessCo
 
                         @Override
                         public void onError(Throwable throwable) {
+                            DeckLog.verbose("[SyncTree] AccessControl group lookup failed: " + throwable.getClass().getSimpleName());
                             super.onError(throwable);
                             latch.countDown();
                         }
@@ -62,10 +65,12 @@ public class AccessControlDataProvider extends AbstractSyncDataProvider<AccessCo
             }
         });
 
+        DeckLog.verbose("[SyncTree] AccessControl participant lookups complete");
         responder.onResponse(acl, IResponseCallback.EMPTY_HEADERS);
     }
 
     private void ensureGroupMembersInDB(Account account, DataBaseAdapter dataBaseAdapter, ServerAdapter serverAdapter, GroupMemberUIDs response) {
+        DeckLog.verbose("[SyncTree] AccessControl waiting for unknown group members=" + response.getUids().size());
         CountDownLatch memberLatch = new CountDownLatch(response.getUids().size());
         for (String uid : response.getUids()) {
             User user = dataBaseAdapter.getUserByUidDirectly(account.getId(), uid);
@@ -106,6 +111,7 @@ public class AccessControlDataProvider extends AbstractSyncDataProvider<AccessCo
         } catch (InterruptedException e) {
             DeckLog.logError(e);
         }
+        DeckLog.verbose("[SyncTree] AccessControl unknown group members complete");
     }
 
     @Override

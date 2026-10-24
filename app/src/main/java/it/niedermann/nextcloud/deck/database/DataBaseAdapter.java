@@ -661,14 +661,22 @@ public class DataBaseAdapter {
     @UiThread
     public LiveData<Account> readAccount(long id) {
         return new ReactiveLiveData<>(db.getAccountDao().getAccountById(id))
-                .tap(account -> account.setUserDisplayName(db.getUserDao().getUserNameByUidDirectly(account.getId(), account.getUserName())), executor)
+                .tap(account -> {
+                    if (account != null) {
+                        account.setUserDisplayName(db.getUserDao().getUserNameByUidDirectly(account.getId(), account.getUserName()));
+                    }
+                }, executor)
                 .distinctUntilChanged();
     }
 
     @UiThread
     public LiveData<Account> readAccount(String name) {
         return new ReactiveLiveData<>(db.getAccountDao().getAccountByName(name))
-                .tap(account -> account.setUserDisplayName(db.getUserDao().getUserNameByUidDirectly(account.getId(), account.getUserName())), executor)
+                .tap(account -> {
+                    if (account != null) {
+                        account.setUserDisplayName(db.getUserDao().getUserNameByUidDirectly(account.getId(), account.getUserName()));
+                    }
+                }, executor)
                 .distinctUntilChanged();
     }
 
@@ -1851,7 +1859,7 @@ public class DataBaseAdapter {
                 .tap(accountId -> {
                     DeckLog.log("--- Read:", context.getString(R.string.shared_preference_last_account), "→", accountId);
                     if (NOT_AVAILABLE.equals(accountId)) {
-                        executor.submit(this::removeCurrentAccount);
+                        executor.submit(() -> saveNeighbourOfAccount(NOT_AVAILABLE));
                     }
                 });
     }
