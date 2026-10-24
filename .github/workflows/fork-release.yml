@@ -1,0 +1,299 @@
+name: Sync upstream and publish fork APK
+
+on:
+  schedule:
+    - cron: '37 17 * * *'
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Upstream branch (master) or release tag to integrate
+        required: false
+        default: master
+        type: string
+      prerelease:
+        description: Mark a manual build as a prerelease
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: nextcloud-deck-upstream-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      TARGET_BRANCH: local-reminders
+      UPSTREAM_REPOSITORY: stefan-niedermann/nextcloud-deck
+      DECK_VERSION_CODE_OFFSET: '1000000'
+    outputs:
+      source_label: ${{ steps.merge.outputs.source_label }}
+      source_sha: ${{ steps.merge.outputs.source_sha }}
+      release_tag: ${{ steps.merge.outputs.release_tag }}
+      prerelease: ${{ steps.merge.outputs.prerelease }}
+      merge_sha: ${{ steps.merge.outputs.merge_sha }}
+      changed: ${{ steps.merge.outputs.changed }}
+      conflict: ${{ steps.merge.outputs.conflict }}
+      conflict_files: ${{ steps.merge.outputs.conflict_files }}
+      should_build: ${{ steps.merge.outputs.should_build }}
+      version_name: ${{ steps.merge.outputs.version_name }}
+    steps:
+      - name: Check out the customized fork branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: local-reminders
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Resolve upstream source and merge
+        id: merge
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SOURCE_REF_INPUT: ${{ inputs.source_ref }}
+          PRERELEASE_INPUT: ${{ inputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch upstream '+refs/heads/master:refs/remotes/upstream/master' --tags
+
+          if [[ "$EVENT_NAME" == 'schedule' ]]; then
+            source_label="$(curl --fail --silent --show-error https://api.github.com/repos/${UPSTREAM_REPOSITORY}/releases/latest | jq -er '.tag_name')"
+            source_ref="refs/tags/${source_label}"
+            prerelease=false
+          else
+            source_label="${SOURCE_REF_INPUT:-master}"
+            prerelease="${PRERELEASE_INPUT:-true}"
+            if [[ "$source_label" == 'master' ]]; then
+              source_ref='refs/remotes/upstream/master'
+            else
+              git check-ref-format "refs/tags/${source_label}"
+              source_ref="refs/tags/${source_label}"
+              git rev-parse --verify "${source_ref}^{commit}" >/dev/null
+            fi
+          fi
+
+          source_sha="$(git rev-parse "${source_ref}^{commit}")"
+          changed=false
+          conflict=false
+          conflict_files=''
+          if ! git merge-base --is-ancestor "$source_sha" HEAD; then
+            if ! git merge --no-ff --no-edit "$source_sha"; then
+              conflict=true
+              conflict_files="$(git diff --name-only --diff-filter=U | paste -sd, -)"
+            else
+              changed=true
+            fi
+          fi
+
+          current_version="$(sed -n 's/.*versionName[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle | head -n1)"
+          if [[ -z "$current_version" ]]; then
+            echo 'Could not read app versionName from app/build.gradle' >&2
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == 'schedule' ]]; then
+            release_tag="fork-${source_label}"
+          elif [[ "$source_label" == 'master' ]]; then
+            release_tag="fork-master-${source_sha:0:12}"
+          else
+            release_tag="fork-${source_label}"
+          fi
+
+          should_build=true
+          if [[ "$conflict" == 'true' ]]; then
+            should_build=false
+          elif [[ "$EVENT_NAME" == 'schedule' && "$changed" == 'false' ]]; then
+            source_version="$(git show "${source_sha}:app/build.gradle" | sed -n 's/.*versionName[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+            if [[ "$source_version" != "$current_version" ]]; then
+              should_build=false
+            fi
+          fi
+          if [[ "$should_build" == 'true' ]] && curl --fail --silent "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" >/dev/null; then
+            should_build=false
+          fi
+
+          merge_sha="$(git rev-parse HEAD)"
+          {
+            printf 'source_label=%s\n' "$source_label"
+            printf 'source_sha=%s\n' "$source_sha"
+            printf 'release_tag=%s\n' "$release_tag"
+            printf 'prerelease=%s\n' "$prerelease"
+            printf 'merge_sha=%s\n' "$merge_sha"
+            printf 'changed=%s\n' "$changed"
+            printf 'conflict=%s\n' "$conflict"
+            printf 'conflict_files=%s\n' "$conflict_files"
+            printf 'should_build=%s\n' "$should_build"
+            printf 'version_name=%s\n' "$current_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Test and build unsigned APK
+        if: steps.merge.outputs.should_build == 'true'
+        run: ./gradlew test lintFdroidRelease assembleFdroidRelease --no-configuration-cache
+
+      - name: Stage unsigned APK artifact
+        if: steps.merge.outputs.should_build == 'true'
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/fdroid/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -s "$apk"
+          cp "$apk" "$RUNNER_TEMP/nextcloud-deck-unsigned.apk"
+
+      - name: Upload unsigned APK
+        if: steps.merge.outputs.should_build == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: nextcloud-deck-unsigned
+          path: ${{ runner.temp }}/nextcloud-deck-unsigned.apk
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Bundle merged Git history
+        if: steps.merge.outputs.should_build == 'true' && steps.merge.outputs.changed == 'true'
+        run: git bundle create "$RUNNER_TEMP/upstream-merge.bundle" HEAD "^origin/local-reminders"
+
+      - name: Upload merged Git bundle
+        if: steps.merge.outputs.should_build == 'true' && steps.merge.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: nextcloud-deck-merge
+          path: ${{ runner.temp }}/upstream-merge.bundle
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-and-publish:
+    needs: build
+    if: needs.build.outputs.should_build == 'true' && needs.build.outputs.conflict != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the target branch for publishing
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: local-reminders
+          fetch-depth: 0
+
+      - name: Download unsigned APK
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: nextcloud-deck-unsigned
+          path: ${{ runner.temp }}/unsigned
+
+      - name: Download merged Git bundle
+        if: needs.build.outputs.changed == 'true'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: nextcloud-deck-merge
+          path: ${{ runner.temp }}/merge
+
+      - name: Configure release signing
+        env:
+          DECK_KEYSTORE_BASE64: ${{ secrets.DECK_KEYSTORE_BASE64 }}
+          DECK_KEYSTORE_PASSWORD: ${{ secrets.DECK_KEYSTORE_PASSWORD }}
+          DECK_KEY_PASSWORD: ${{ secrets.DECK_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DECK_KEYSTORE_BASE64:?Missing DECK_KEYSTORE_BASE64 secret}"
+          : "${DECK_KEYSTORE_PASSWORD:?Missing DECK_KEYSTORE_PASSWORD secret}"
+          : "${DECK_KEY_PASSWORD:?Missing DECK_KEY_PASSWORD secret}"
+          keystore_path="${RUNNER_TEMP}/nextcloud-deck-release.jks"
+          printf '%s' "$DECK_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          chmod 600 "$keystore_path"
+          printf 'DECK_KEYSTORE_PATH=%s\n' "$keystore_path" >> "$GITHUB_ENV"
+
+      - name: Sign and verify APK
+        env:
+          DECK_KEYSTORE_PASSWORD: ${{ secrets.DECK_KEYSTORE_PASSWORD }}
+          DECK_KEY_PASSWORD: ${{ secrets.DECK_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk_signer="$(find "${ANDROID_HOME}/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -n1)"
+          test -x "$apk_signer"
+          "$apk_signer" sign \
+            --ks "$DECK_KEYSTORE_PATH" \
+            --ks-key-alias deck-release \
+            --ks-pass env:DECK_KEYSTORE_PASSWORD \
+            --key-pass env:DECK_KEY_PASSWORD \
+            --out "$RUNNER_TEMP/nextcloud-deck-fork.apk" \
+            "$RUNNER_TEMP/unsigned/nextcloud-deck-unsigned.apk"
+          "$apk_signer" verify --verbose "$RUNNER_TEMP/nextcloud-deck-fork.apk"
+
+      - name: Push successful upstream merge
+        if: needs.build.outputs.changed == 'true'
+        env:
+          MERGE_SHA: ${{ needs.build.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          git fetch "$RUNNER_TEMP/merge/upstream-merge.bundle" "$MERGE_SHA"
+          git merge-base --is-ancestor HEAD "$MERGE_SHA"
+          git push origin "${MERGE_SHA}:refs/heads/local-reminders"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          SOURCE_LABEL: ${{ needs.build.outputs.source_label }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          MERGE_SHA: ${{ needs.build.outputs.merge_sha }}
+          VERSION_NAME: ${{ needs.build.outputs.version_name }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          cat > "$notes_file" <<EOF
+          Customized Nextcloud Deck build with the local reminder changes.
+
+          Upstream source: [\`${SOURCE_LABEL}\`](https://github.com/stefan-niedermann/nextcloud-deck/tree/${SOURCE_LABEL}) at \`${SOURCE_SHA}\`.
+
+          This APK is signed with the private key configured for this fork. It uses the upstream package ID, so installing it over an official build requires removing the official app first. Updates from this fork use the same signing key.
+          EOF
+          args=("$RELEASE_TAG" "$RUNNER_TEMP/nextcloud-deck-fork.apk"
+            --repo "$GITHUB_REPOSITORY"
+            --target "$MERGE_SHA"
+            --title "Nextcloud Deck ${VERSION_NAME} (default-student fork)"
+            --notes-file "$notes_file")
+          if [[ "$PRERELEASE" == 'true' ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
+
+  notify:
+    needs: [build, sign-and-publish]
+    if: always() && (needs.build.outputs.conflict == 'true' || needs.build.result == 'failure' || needs.sign-and-publish.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Create GitHub notification issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONFLICT: ${{ needs.build.outputs.conflict }}
+          SOURCE_LABEL: ${{ needs.build.outputs.source_label }}
+          CONFLICT_FILES: ${{ needs.build.outputs.conflict_files }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [[ "$CONFLICT" == 'true' ]]; then
+            issue_title="Upstream merge conflict: ${SOURCE_LABEL}"
+            issue_body="$(printf 'Upstream source %s could not be merged into local-reminders.\n\nConflicting files: %s\n\nThe branch was not pushed and no APK was published. Resolve the conflict manually, then rerun this workflow.\n\nWorkflow run: %s' "$SOURCE_LABEL" "$CONFLICT_FILES" "$run_url")"
+          else
+            issue_title="Fork APK workflow failed: run ${GITHUB_RUN_NUMBER}"
+            issue_body="$(printf 'The upstream sync, unsigned build, signing, or release step failed. No release should be considered ready until this run is reviewed.\n\nWorkflow run: %s' "$run_url")"
+          fi
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$issue_title" --body "$issue_body"
