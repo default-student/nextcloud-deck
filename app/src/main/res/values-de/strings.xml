@@ -67,6 +67,14 @@
     <string name="hint_assign_people">Benutzer zuweisen</string>
     <string name="hint_due_date_date">Fälligkeitsdatum</string>
     <string name="hint_due_date_time">Zeit</string>
+    <string name="due_date_quick_pick_15_minutes">In 15 Min.</string>
+    <string name="due_date_quick_pick_1_hour">In 1 Std.</string>
+    <string name="due_date_quick_pick_today">Heute</string>
+    <string name="due_date_quick_pick_tomorrow">Morgen</string>
+    <string name="due_date_quick_pick_times_today">Uhrzeit für heute</string>
+    <string name="due_date_quick_pick_times_tomorrow">Uhrzeit für morgen</string>
+    <string name="due_date_quick_pick_show_times">%1$s, %2$s</string>
+    <string name="due_date_quick_pick_at_day_time">%1$s um %2$s</string>
     <string name="hint_start_date_date">Startdatum</string>
     <string name="hint_start_date_time">Zeit</string>
 

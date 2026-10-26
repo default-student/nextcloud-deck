@@ -66,7 +66,7 @@
         android:layout_marginEnd="@dimen/spacer_2x"
         android:hint="@string/hint_due_date_date"
         android:labelFor="@id/dueDateDate"
-        app:layout_constraintBottom_toTopOf="@id/markAsDone"
+        app:layout_constraintBottom_toTopOf="@id/dueDateQuickPicks"
         app:layout_constraintEnd_toStartOf="@id/dueDateTimeWrapper"
         app:layout_constraintHorizontal_weight="2"
         app:layout_constraintStart_toStartOf="parent"
@@ -84,6 +84,43 @@
             android:maxLines="1"
             tools:text="01/07/2020" />
     </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.chip.ChipGroup
+        android:id="@+id/dueDateQuickPicks"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/spacer_1hx"
+        app:chipSpacingHorizontal="@dimen/spacer_1hx"
+        app:chipSpacingVertical="0dp"
+        app:layout_constraintBottom_toTopOf="@id/dueDateQuickPickTimesLabel"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/dueDateDateWrapper" />
+
+    <TextView
+        android:id="@+id/dueDateQuickPickTimesLabel"
+        style="?attr/textAppearanceBodySmall"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/spacer_1hx"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@id/dueDateQuickPickTimes"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/dueDateQuickPicks"
+        tools:text="Set time today" />
+
+    <com.google.android.material.chip.ChipGroup
+        android:id="@+id/dueDateQuickPickTimes"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        app:chipSpacingHorizontal="@dimen/spacer_1hx"
+        app:chipSpacingVertical="0dp"
+        app:layout_constraintBottom_toTopOf="@id/markAsDone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/dueDateQuickPickTimesLabel" />
 
     <com.google.android.material.textfield.TextInputLayout
         android:id="@+id/dueDateTimeWrapper"
@@ -139,5 +176,5 @@
         app:backgroundTint="@color/defaultBrand"
         app:icon="@drawable/ic_check_white_24dp"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/dueDateDateWrapper" />
+        app:layout_constraintTop_toBottomOf="@id/dueDateQuickPickTimes" />
 </androidx.constraintlayout.widget.ConstraintLayout>

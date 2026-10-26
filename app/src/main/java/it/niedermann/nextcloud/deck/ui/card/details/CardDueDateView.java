@@ -12,11 +12,14 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.FragmentManager;
 
+import com.google.android.material.chip.Chip;
 import com.nextcloud.android.common.ui.theme.utils.ColorRole;
 import com.wdullaer.materialdatetimepicker.date.DatePickerDialog;
 import com.wdullaer.materialdatetimepicker.time.TimePickerDialog;
 
 import java.time.Instant;
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
@@ -24,6 +27,9 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.FormatStyle;
 import java.util.stream.Stream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 import it.niedermann.nextcloud.deck.R;
 import it.niedermann.nextcloud.deck.databinding.ViewCardDueDateBinding;
@@ -50,6 +56,15 @@ public class CardDueDateView extends FrameLayout implements DatePickerDialog.OnD
     @ColorInt
     private Integer color = null;
     private FragmentManager fragmentManager = null;
+    @Nullable
+    private LocalDate expandedQuickPickDate;
+    private static final List<LocalTime> QUICK_PICK_TIMES = Arrays.asList(
+            LocalTime.of(7, 0),
+            LocalTime.of(9, 0),
+            LocalTime.of(13, 0),
+            LocalTime.of(15, 0),
+            LocalTime.of(21, 0)
+    );
 
     public CardDueDateView(Context context) {
         super(context);
@@ -94,6 +109,7 @@ public class CardDueDateView extends FrameLayout implements DatePickerDialog.OnD
         setVisibilityState();
         setTextState();
         setInteraction();
+        renderQuickPicks();
     }
 
     private void setVisibilityState() {
@@ -129,6 +145,133 @@ public class CardDueDateView extends FrameLayout implements DatePickerDialog.OnD
             binding.clearDone.setVisibility(supportsDone ? View.VISIBLE : View.GONE);
             binding.doneDueDate.setVisibility(dueDate == null || !isEnabled() ? View.GONE : View.VISIBLE);
         }
+    }
+
+    private void renderQuickPicks() {
+        binding.dueDateQuickPicks.removeAllViews();
+        binding.dueDateQuickPickTimes.removeAllViews();
+
+        if (done != null || !isEnabled()) {
+            binding.dueDateQuickPicks.setVisibility(View.GONE);
+            binding.dueDateQuickPickTimesLabel.setVisibility(View.GONE);
+            binding.dueDateQuickPickTimes.setVisibility(View.GONE);
+            return;
+        }
+
+        binding.dueDateQuickPicks.setVisibility(View.VISIBLE);
+        binding.dueDateQuickPicks.addView(createQuickPickChip(
+                R.string.due_date_quick_pick_15_minutes,
+                v -> applySuggestedDueDate(Instant.now().plus(Duration.ofMinutes(15)))
+        ));
+        binding.dueDateQuickPicks.addView(createQuickPickChip(
+                R.string.due_date_quick_pick_1_hour,
+                v -> applySuggestedDueDate(Instant.now().plus(Duration.ofHours(1)))
+        ));
+
+        final ZoneId zone = ZoneId.systemDefault();
+        final ZonedDateTime now = ZonedDateTime.now(zone);
+        final LocalDate today = now.toLocalDate();
+        final LocalDate tomorrow = today.plusDays(1);
+        final List<LocalTime> todayTimes = getSuggestedTimesForToday(now.toLocalTime());
+        if (!todayTimes.isEmpty()) {
+            binding.dueDateQuickPicks.addView(createDayQuickPickChip(
+                    R.string.due_date_quick_pick_today,
+                    today,
+                    R.string.due_date_quick_pick_times_today
+            ));
+        }
+        binding.dueDateQuickPicks.addView(createDayQuickPickChip(
+                R.string.due_date_quick_pick_tomorrow,
+                tomorrow,
+                R.string.due_date_quick_pick_times_tomorrow
+        ));
+
+        if (expandedQuickPickDate != null) {
+            final boolean isToday = expandedQuickPickDate.equals(today);
+            final List<LocalTime> times = isToday ? todayTimes : QUICK_PICK_TIMES;
+            if (times.isEmpty()) {
+                expandedQuickPickDate = null;
+                binding.dueDateQuickPickTimesLabel.setVisibility(View.GONE);
+                binding.dueDateQuickPickTimes.setVisibility(View.GONE);
+                return;
+            }
+
+            binding.dueDateQuickPickTimesLabel.setText(isToday
+                    ? R.string.due_date_quick_pick_times_today
+                    : R.string.due_date_quick_pick_times_tomorrow);
+            binding.dueDateQuickPickTimesLabel.setVisibility(View.VISIBLE);
+            binding.dueDateQuickPickTimes.setVisibility(View.VISIBLE);
+            final String dayLabel = getContext().getString(isToday
+                    ? R.string.due_date_quick_pick_today
+                    : R.string.due_date_quick_pick_tomorrow);
+            for (LocalTime time : times) {
+                final Instant selected = toSuggestedInstant(expandedQuickPickDate, time, zone);
+                final String formattedTime = time.format(timeFormatter);
+                final Chip chip = createQuickPickChip(formattedTime, v -> applySuggestedDueDate(selected));
+                chip.setContentDescription(getContext().getString(
+                        R.string.due_date_quick_pick_at_day_time,
+                        dayLabel,
+                        formattedTime
+                ));
+                binding.dueDateQuickPickTimes.addView(chip);
+            }
+        } else {
+            binding.dueDateQuickPickTimesLabel.setVisibility(View.GONE);
+            binding.dueDateQuickPickTimes.setVisibility(View.GONE);
+        }
+    }
+
+    private Chip createDayQuickPickChip(int labelRes, @NonNull LocalDate date, int timesLabelRes) {
+        final Chip chip = createQuickPickChip(labelRes, v -> {
+            expandedQuickPickDate = date.equals(expandedQuickPickDate) ? null : date;
+            renderQuickPicks();
+        });
+        chip.setCheckable(true);
+        chip.setChecked(date.equals(expandedQuickPickDate));
+        chip.setContentDescription(getContext().getString(
+                R.string.due_date_quick_pick_show_times,
+                getContext().getString(labelRes),
+                getContext().getString(timesLabelRes)
+        ));
+        return chip;
+    }
+
+    private Chip createQuickPickChip(int labelRes, @NonNull OnClickListener listener) {
+        return createQuickPickChip(getContext().getString(labelRes), listener);
+    }
+
+    private Chip createQuickPickChip(@NonNull String label, @NonNull OnClickListener listener) {
+        final Chip chip = new Chip(getContext());
+        chip.setText(label);
+        chip.setCheckable(false);
+        chip.setEnsureMinTouchTargetSize(true);
+        chip.setOnClickListener(listener);
+        return chip;
+    }
+
+    private void applySuggestedDueDate(@NonNull Instant suggestedDueDate) {
+        expandedQuickPickDate = null;
+        dueDate = suggestedDueDate;
+        if (dueDateChangedListener != null) {
+            dueDateChangedListener.onDueDateChanged(suggestedDueDate);
+        }
+        render();
+    }
+
+    @NonNull
+    static List<LocalTime> getSuggestedTimesForToday(@NonNull LocalTime now) {
+        final List<LocalTime> suggestions = new ArrayList<>();
+        for (LocalTime time : QUICK_PICK_TIMES) {
+            if (time.isAfter(now)) {
+                suggestions.add(time);
+            }
+        }
+        return suggestions;
+    }
+
+    @NonNull
+    static Instant toSuggestedInstant(@NonNull LocalDate date, @NonNull LocalTime time, @NonNull ZoneId zone) {
+        return LocalDateTime.of(date, time).atZone(zone).toInstant();
     }
 
     private void setTextState() {
