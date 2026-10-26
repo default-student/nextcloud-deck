@@ -77,6 +77,28 @@ class ReleaseResolverTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolver.next_release_versions(2_100_000_000, 1, [])
 
+    def test_minimum_release_version_floor_and_published_versions_are_monotonic(self):
+        latest = [{
+            "draft": False,
+            "published_at": "2026-10-24",
+            "tag_name": "v1.27.0-fork.7",
+            "body": "Android versionCode: 2027007",
+        }]
+        self.assertEqual(
+            resolver.next_release_versions(2027000, 2, latest, minimum_code=2027010),
+            (10, 2027010),
+        )
+        after_floor_release = latest + [{
+            "draft": False,
+            "published_at": "2026-10-26",
+            "tag_name": "v1.27.0-fork.10",
+            "body": "Android versionCode: 2027010",
+        }]
+        self.assertEqual(
+            resolver.next_release_versions(2027000, 2, after_floor_release, minimum_code=2027010),
+            (11, 2027011),
+        )
+
     def test_deck_display_version_does_not_regress_to_older_upstream_tag(self):
         if not hasattr(resolver, "release_display_version"):
             self.skipTest("This resolver does not calculate the Deck app version")

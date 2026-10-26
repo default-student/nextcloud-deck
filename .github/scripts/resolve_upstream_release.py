@@ -143,8 +143,18 @@ def find_source_release(releases: list[dict[str, Any]], source_sha: str, asset_n
     return None
 
 
-def next_release_versions(base_code: int, run_number: int, releases: list[dict[str, Any]], maximum: int = 2100000000) -> tuple[int, int]:
+def next_release_versions(
+    base_code: int,
+    run_number: int,
+    releases: list[dict[str, Any]],
+    maximum: int = 2100000000,
+    minimum_code: int | None = None,
+) -> tuple[int, int]:
     serials = [run_number]
+    if minimum_code is not None:
+        if minimum_code < base_code:
+            raise ValueError(f"Minimum fork versionCode {minimum_code} is below base versionCode {base_code}")
+        serials.append(minimum_code - base_code)
     existing_codes: list[int] = []
     for release in releases:
         if release.get("draft") or not release.get("published_at"):

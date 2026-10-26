@@ -214,13 +214,14 @@ jobs:
           print(release_display_version(sys.argv[1], sys.argv[2]))
           PY
           )"
-            versions="$(python3 - "$RUNNER_TEMP/releases.json" "$GITHUB_RUN_NUMBER" <<'PY'
+          minimum_version_code="$(tr -d '\r\n' < .github/fork-release-version-code-floor)"
+          versions="$(python3 - "$RUNNER_TEMP/releases.json" "$GITHUB_RUN_NUMBER" "$minimum_version_code" <<'PY'
           import json, sys
           from pathlib import Path
           sys.path.insert(0, '.github/scripts')
           from resolve_upstream_release import next_release_versions
           releases = json.loads(Path(sys.argv[1]).read_text())
-          serial, code = next_release_versions(2027000, int(sys.argv[2]), releases)
+          serial, code = next_release_versions(2027000, int(sys.argv[2]), releases, minimum_code=int(sys.argv[3]))
           print(f'{serial} {code}')
           PY
           )"
