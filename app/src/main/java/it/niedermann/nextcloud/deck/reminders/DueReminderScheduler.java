@@ -12,6 +12,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
 
@@ -38,10 +39,12 @@ import it.niedermann.nextcloud.deck.model.Stack;
 import it.niedermann.nextcloud.deck.model.enums.DBStatus;
 import it.niedermann.nextcloud.deck.model.full.FullCard;
 import it.niedermann.nextcloud.deck.ui.card.EditActivity;
+import it.niedermann.nextcloud.deck.util.ExecutorServiceProvider;
 
 public final class DueReminderScheduler {
 
     private static final int SNOOZE_MINUTES = 5;
+    private static final String SNOOZE_SHARED_PREFERENCE_PREFIX = "local_due_reminder_snoozed_until_";
     static final String CHANNEL_ID = "due_reminders";
     private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM);
 
@@ -53,7 +56,30 @@ public final class DueReminderScheduler {
         return preferences.getBoolean(context.getString(R.string.pref_key_local_due_reminders), true);
     }
 
-    public static void rescheduleAll(@NonNull Context context) {
+    public static void setEnabledAndReconcile(@NonNull Context context, boolean enabled) {
+        final Context appContext = context.getApplicationContext();
+        PreferenceManager.getDefaultSharedPreferences(appContext).edit()
+                .putBoolean(appContext.getString(R.string.pref_key_local_due_reminders), enabled)
+                .apply();
+
+        ExecutorServiceProvider.getLinkedBlockingQueueExecutor().submit(() -> {
+            try {
+                reconcileAll(appContext);
+            } catch (RuntimeException exception) {
+                DeckLog.logError(exception);
+            }
+        });
+    }
+
+    private static synchronized void reconcileAll(@NonNull Context context) {
+        if (isEnabled(context)) {
+            rescheduleAll(context);
+        } else {
+            cancelAll(context);
+        }
+    }
+
+    public static synchronized void rescheduleAll(@NonNull Context context) {
         if (!isEnabled(context)) {
             cancelAll(context);
             return;
@@ -66,30 +92,56 @@ public final class DueReminderScheduler {
         }
     }
 
-    public static void cancelAll(@NonNull Context context) {
+    public static synchronized void cancelAll(@NonNull Context context) {
         final var dataBaseAdapter = new DataBaseAdapter(context.getApplicationContext());
         final List<FullCard> cards = dataBaseAdapter.getUpcomingFullCardsDirectly();
         for (FullCard fullCard : cards) {
-            cancelCard(context, fullCard.getCard().getLocalId());
+            cancelAlarm(context, fullCard.getCard().getLocalId());
         }
     }
 
-    public static void scheduleCard(@NonNull Context context, @Nullable Card card) {
+    public static synchronized void scheduleCard(@NonNull Context context, @Nullable Card card) {
         if (card == null || card.getLocalId() == null) {
             return;
         }
 
-        cancelCard(context, card.getLocalId());
-
-        if (!isEnabled(context) || !shouldSchedule(card)) {
+        if (!isEnabled(context)) {
+            cancelAlarm(context, card.getLocalId());
             return;
         }
 
-        scheduleAt(context, card.getLocalId(), card.getDueDate().toEpochMilli());
-        DeckLog.info("Scheduled due reminder for card", card.getLocalId(), "at", card.getDueDate());
+        if (!shouldNotify(card)) {
+            cancelCard(context, card.getLocalId());
+            return;
+        }
+
+        final long nowMillis = Instant.now().toEpochMilli();
+        final long snoozedUntilMillis = getSnoozedUntil(context, card.getLocalId());
+        final long nextTriggerMillis = nextTriggerAtMillis(card, snoozedUntilMillis, nowMillis);
+        if (nextTriggerMillis <= 0L) {
+            clearSnooze(context, card.getLocalId());
+            cancelAlarm(context, card.getLocalId());
+            return;
+        }
+
+        if (card.getDueDate().toEpochMilli() > nowMillis) {
+            clearSnooze(context, card.getLocalId());
+        }
+        cancelAlarm(context, card.getLocalId());
+        scheduleAt(context, card.getLocalId(), nextTriggerMillis);
+        DeckLog.info("Scheduled due reminder for card", card.getLocalId(), "at", Instant.ofEpochMilli(nextTriggerMillis));
     }
 
-    public static void cancelCard(@NonNull Context context, @Nullable Long cardLocalId) {
+    public static synchronized void cancelCard(@NonNull Context context, @Nullable Long cardLocalId) {
+        if (cardLocalId == null || cardLocalId <= 0L) {
+            return;
+        }
+
+        clearSnooze(context, cardLocalId);
+        cancelAlarm(context, cardLocalId);
+    }
+
+    private static void cancelAlarm(@NonNull Context context, @Nullable Long cardLocalId) {
         if (cardLocalId == null || cardLocalId <= 0L) {
             return;
         }
@@ -133,7 +185,7 @@ public final class DueReminderScheduler {
                 .format(DATE_TIME_FORMATTER);
         final String text = context.getString(R.string.local_due_reminder_notification_text, board.getTitle(), stack.getTitle(), dueAt);
 
-        final var notification = new NotificationCompat.Builder(context, CHANNEL_ID)
+        final var notificationBuilder = new NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_notifications_24)
                 .setContentTitle(title)
                 .setContentText(text)
@@ -145,8 +197,9 @@ public final class DueReminderScheduler {
                 .setFullScreenIntent(fullScreenPendingIntent, true)
                 .addAction(R.drawable.ic_outline_check_circle_24, context.getString(R.string.local_due_reminder_mark_complete), completePendingIntent)
                 .addAction(R.drawable.ic_time_24, context.getString(R.string.local_due_reminder_snooze), snoozePendingIntent)
-                .setAutoCancel(true)
-                .build();
+                .setAutoCancel(true);
+
+        final var notification = notificationBuilder.build();
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
                 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
@@ -157,7 +210,7 @@ public final class DueReminderScheduler {
         }
     }
 
-    public static void snooze(@NonNull Context context, long cardLocalId) {
+    public static synchronized void snooze(@NonNull Context context, long cardLocalId) {
         if (!isEnabled(context)) {
             return;
         }
@@ -170,12 +223,13 @@ public final class DueReminderScheduler {
         }
 
         final long snoozedUntilMillis = Instant.now().plusSeconds(SNOOZE_MINUTES * 60L).toEpochMilli();
+        persistSnoozedUntil(context, cardLocalId, snoozedUntilMillis);
         scheduleAt(context, cardLocalId, snoozedUntilMillis);
         NotificationManagerCompat.from(context).cancel(notificationId(cardLocalId));
         DeckLog.info("Snoozed due reminder for card", cardLocalId, "until", Instant.ofEpochMilli(snoozedUntilMillis));
     }
 
-    public static void markComplete(@NonNull Context context, long cardLocalId) {
+    public static synchronized void markComplete(@NonNull Context context, long cardLocalId) {
         final var dataBaseAdapter = new DataBaseAdapter(context.getApplicationContext());
         if (dataBaseAdapter.markCardDoneDirectly(cardLocalId, Instant.now())) {
             cancelCard(context, cardLocalId);
@@ -194,11 +248,20 @@ public final class DueReminderScheduler {
     @NonNull
     public static Intent createExactAlarmSettingsIntent(@NonNull Context context) {
         return new Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
-                .setPackage(context.getPackageName());
+                .setData(Uri.fromParts("package", context.getPackageName(), null));
     }
 
     private static boolean canScheduleExactAlarms(@NonNull AlarmManager alarmManager) {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms();
+    }
+
+    public static boolean canUseFullScreenIntent(@NonNull Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return true;
+        }
+
+        final var notificationManager = context.getSystemService(NotificationManager.class);
+        return notificationManager != null && notificationManager.canUseFullScreenIntent();
     }
 
     private static void scheduleAt(@NonNull Context context, long cardLocalId, long triggerAtMillis) {
@@ -211,23 +274,65 @@ public final class DueReminderScheduler {
         final PendingIntent pendingIntent = createReminderPendingIntent(context, cardLocalId);
 
         if (canScheduleExactAlarms(alarmManager)) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
-            } else {
-                alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
+                } else {
+                    alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
+                }
+            } catch (SecurityException exception) {
+                DeckLog.warn("Exact alarm access changed while scheduling; falling back to an inexact reminder for card", cardLocalId);
+                scheduleInexact(alarmManager, triggerAtMillis, pendingIntent);
             }
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        } else {
+            scheduleInexact(alarmManager, triggerAtMillis, pendingIntent);
+        }
+    }
+
+    private static void scheduleInexact(@NonNull AlarmManager alarmManager, long triggerAtMillis, @NonNull PendingIntent pendingIntent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
         } else {
             alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent);
         }
     }
 
-    private static boolean shouldSchedule(@NonNull Card card) {
-        return shouldNotify(card) && card.getDueDate().isAfter(Instant.now());
+    static long getSnoozedUntil(@NonNull Context context, long cardLocalId) {
+        return PreferenceManager.getDefaultSharedPreferences(context.getApplicationContext())
+                .getLong(snoozePreferenceKey(cardLocalId), 0L);
     }
 
-    private static boolean shouldNotify(@NonNull Card card) {
+    static void persistSnoozedUntil(@NonNull Context context, long cardLocalId, long snoozedUntilMillis) {
+        PreferenceManager.getDefaultSharedPreferences(context.getApplicationContext()).edit()
+                .putLong(snoozePreferenceKey(cardLocalId), snoozedUntilMillis)
+                .apply();
+    }
+
+    static void clearSnooze(@NonNull Context context, long cardLocalId) {
+        PreferenceManager.getDefaultSharedPreferences(context.getApplicationContext()).edit()
+                .remove(snoozePreferenceKey(cardLocalId))
+                .apply();
+    }
+
+    @NonNull
+    private static String snoozePreferenceKey(long cardLocalId) {
+        return SNOOZE_SHARED_PREFERENCE_PREFIX + cardLocalId;
+    }
+
+    static long nextTriggerAtMillis(@NonNull Card card, long snoozedUntilMillis, long nowMillis) {
+        if (!shouldNotify(card)) {
+            return 0L;
+        }
+
+        final long dueAtMillis = card.getDueDate().toEpochMilli();
+        if (dueAtMillis > nowMillis) {
+            return dueAtMillis;
+        }
+
+        return snoozedUntilMillis > nowMillis ? snoozedUntilMillis : 0L;
+    }
+
+    static boolean shouldNotify(@NonNull Card card) {
         return card.getDueDate() != null
                 && card.getDone() == null
                 && !card.isArchived()

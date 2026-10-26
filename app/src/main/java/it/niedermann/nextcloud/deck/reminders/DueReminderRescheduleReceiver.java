@@ -12,9 +12,22 @@ public class DueReminderRescheduleReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         final var appContext = context.getApplicationContext();
-        ExecutorServiceProvider.getLinkedBlockingQueueExecutor().submit(() -> {
-            DeckLog.info("Rescheduling local due reminders after", intent == null ? "unknown broadcast" : intent.getAction());
-            DueReminderScheduler.rescheduleAll(appContext);
-        });
+        final PendingResult pendingResult = goAsync();
+        final String action = intent == null ? "unknown broadcast" : intent.getAction();
+        try {
+            ExecutorServiceProvider.getLinkedBlockingQueueExecutor().submit(() -> {
+                try {
+                    DeckLog.info("Rescheduling local due reminders after", action);
+                    DueReminderScheduler.rescheduleAll(appContext);
+                } catch (RuntimeException exception) {
+                    DeckLog.logError(exception);
+                } finally {
+                    pendingResult.finish();
+                }
+            });
+        } catch (RuntimeException exception) {
+            pendingResult.finish();
+            DeckLog.logError(exception);
+        }
     }
 }

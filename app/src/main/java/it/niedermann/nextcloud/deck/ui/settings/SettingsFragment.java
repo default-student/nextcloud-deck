@@ -3,14 +3,17 @@ package it.niedermann.nextcloud.deck.ui.settings;
 import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.View;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
 import androidx.lifecycle.ViewModelProvider;
 import androidx.preference.Preference;
@@ -36,6 +39,8 @@ public class SettingsFragment extends PreferenceFragmentCompat {
     private ThemedSwitchPreference coverImagesPref;
     private ThemedSwitchPreference compressImageAttachmentsPref;
     private ThemedSwitchPreference localDueRemindersPref;
+    private Preference localDueRemindersExactAlarmPref;
+    private Preference localDueRemindersFullScreenPref;
     private ThemedSwitchPreference debuggingPref;
     private ThemedSwitchPreference eTagPref;
 
@@ -63,6 +68,8 @@ public class SettingsFragment extends PreferenceFragmentCompat {
         compactPref = findPreference(getString(R.string.pref_key_compact));
         compressImageAttachmentsPref = findPreference(getString(R.string.pref_key_compress_image_attachments));
         localDueRemindersPref = findPreference(getString(R.string.pref_key_local_due_reminders));
+        localDueRemindersExactAlarmPref = findPreference(getString(R.string.pref_key_local_due_reminders_exact_alarm));
+        localDueRemindersFullScreenPref = findPreference(getString(R.string.pref_key_local_due_reminders_full_screen));
         eTagPref = findPreference(getString(R.string.pref_key_etags));
 
         debuggingPref = findPreference(getString(R.string.pref_key_debugging));
@@ -100,15 +107,38 @@ public class SettingsFragment extends PreferenceFragmentCompat {
             localDueRemindersPref.setOnPreferenceChangeListener((Preference preference, Object newValue) -> {
                 if (Boolean.TRUE.equals(newValue)) {
                     requestNotificationPermissionIfNeeded();
-                    DueReminderScheduler.rescheduleAll(requireContext().getApplicationContext());
-                } else {
-                    DueReminderScheduler.cancelAll(requireContext().getApplicationContext());
                 }
+                DueReminderScheduler.setEnabledAndReconcile(requireContext(), Boolean.TRUE.equals(newValue));
+                updateReminderAccessPreferences(Boolean.TRUE.equals(newValue));
                 return true;
             });
         } else {
             DeckLog.error("Could not find preference with key", getString(R.string.pref_key_local_due_reminders));
         }
+
+        if (localDueRemindersExactAlarmPref != null) {
+            localDueRemindersExactAlarmPref.setVisible(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S);
+            localDueRemindersExactAlarmPref.setOnPreferenceClickListener(preference -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    startActivity(DueReminderScheduler.createExactAlarmSettingsIntent(requireContext()));
+                }
+                return true;
+            });
+        }
+
+        if (localDueRemindersFullScreenPref != null) {
+            final boolean supportsFullScreenAccess = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE;
+            localDueRemindersFullScreenPref.setVisible(supportsFullScreenAccess);
+            localDueRemindersFullScreenPref.setOnPreferenceClickListener(preference -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    final Intent intent = new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT)
+                            .setData(Uri.fromParts("package", requireContext().getPackageName(), null));
+                    startActivity(intent);
+                }
+                return true;
+            });
+        }
+        updateReminderAccessPreferences();
 
         final var themePref = findPreference(getString(R.string.pref_key_dark_theme));
         if (themePref != null) {
@@ -138,8 +168,36 @@ public class SettingsFragment extends PreferenceFragmentCompat {
                 .forEach(pref -> pref.applyTheme(account.getColor()));
     }
 
+    @Override
+    public void onResume() {
+        super.onResume();
+        updateReminderAccessPreferences();
+    }
+
+    private void updateReminderAccessPreferences() {
+        updateReminderAccessPreferences(DueReminderScheduler.isEnabled(requireContext()));
+    }
+
+    private void updateReminderAccessPreferences(boolean remindersEnabled) {
+        if (localDueRemindersExactAlarmPref != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            localDueRemindersExactAlarmPref.setEnabled(remindersEnabled);
+            localDueRemindersExactAlarmPref.setSummary(DueReminderScheduler.canScheduleExactAlarms(requireContext())
+                    ? R.string.settings_local_due_reminders_exact_alarm_allowed
+                    : R.string.settings_local_due_reminders_exact_alarm_denied);
+        }
+
+        if (localDueRemindersFullScreenPref != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            localDueRemindersFullScreenPref.setEnabled(remindersEnabled);
+            localDueRemindersFullScreenPref.setSummary(DueReminderScheduler.canUseFullScreenIntent(requireContext())
+                    ? R.string.settings_local_due_reminders_full_screen_allowed
+                    : R.string.settings_local_due_reminders_full_screen_denied);
+        }
+    }
+
     private void requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 0);
         }
     }

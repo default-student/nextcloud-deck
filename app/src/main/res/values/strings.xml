@@ -156,6 +156,12 @@
     <string name="settings_push_notifications">Push notifications</string>
     <string name="settings_local_due_reminders">Local due reminders</string>
     <string name="settings_local_due_reminders_summary">Show reminders from synced card due dates, even without Google Play push.</string>
+    <string name="settings_local_due_reminders_exact_alarm_title">Precise reminder timing</string>
+    <string name="settings_local_due_reminders_exact_alarm_allowed">Exact alarm access is allowed. Tap to manage Android settings.</string>
+    <string name="settings_local_due_reminders_exact_alarm_denied">Exact alarm access is off. Tap to manage it; Android may delay reminders without it.</string>
+    <string name="settings_local_due_reminders_full_screen_title">Full-screen alerts on the lock screen</string>
+    <string name="settings_local_due_reminders_full_screen_allowed">Android allows Deck to open a full-screen reminder. Tap to manage this access.</string>
+    <string name="settings_local_due_reminders_full_screen_denied">Full-screen access is off. Tap to manage it; reminders can still appear as lock-screen notifications.</string>
     <string name="settings_compress_image_attachments">Compress images on upload</string>
     <string name="search_in">Search in %1$s</string>
     <string name="settings_compress_image_attachments_summary">Faster upload, less quality</string>

@@ -34,6 +34,7 @@ public class DueReminderActivity extends AppCompatActivity {
 
     private ActivityDueReminderBinding binding;
     private long cardLocalId;
+    private int loadRequestId;
     @Nullable
     private Account account;
     @Nullable
@@ -62,6 +63,28 @@ public class DueReminderActivity extends AppCompatActivity {
         loadReminder();
     }
 
+    @Override
+    protected void onNewIntent(@NonNull Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+
+        final long newCardLocalId = intent.getLongExtra(DueReminderReceiver.EXTRA_CARD_LOCAL_ID, -1L);
+        if (newCardLocalId <= 0L) {
+            finish();
+            return;
+        }
+
+        if (newCardLocalId == cardLocalId) {
+            return;
+        }
+
+        cardLocalId = newCardLocalId;
+        loadRequestId++;
+        account = null;
+        board = null;
+        loadReminder();
+    }
+
     @NonNull
     static Intent createIntent(@NonNull Context context, long cardLocalId) {
         return new Intent(context, DueReminderActivity.class)
@@ -81,13 +104,18 @@ public class DueReminderActivity extends AppCompatActivity {
     }
 
     private void loadReminder() {
+        final long requestedCardLocalId = cardLocalId;
+        final int requestId = ++loadRequestId;
         setLoading(true);
         final var appContext = getApplicationContext();
         ExecutorServiceProvider.getLinkedBlockingQueueExecutor().submit(() -> {
             final var dataBaseAdapter = new DataBaseAdapter(appContext);
-            final FullCard fullCard = dataBaseAdapter.getFullCardByLocalIdDirectly(cardLocalId);
-            if (fullCard == null || fullCard.getCard().getDone() != null || fullCard.getCard().getDueDate() == null) {
+            final FullCard fullCard = dataBaseAdapter.getFullCardByLocalIdDirectly(requestedCardLocalId);
+            if (fullCard == null || !DueReminderScheduler.shouldNotify(fullCard.getCard())) {
                 runOnUiThread(() -> {
+                    if (requestId != loadRequestId) {
+                        return;
+                    }
                     Toast.makeText(this, R.string.local_due_reminder_unavailable, Toast.LENGTH_SHORT).show();
                     finish();
                 });
@@ -95,9 +123,13 @@ public class DueReminderActivity extends AppCompatActivity {
             }
 
             final Account loadedAccount = dataBaseAdapter.getAccountByIdDirectly(fullCard.getAccountId());
-            final Board loadedBoard = dataBaseAdapter.getBoardByLocalCardIdDirectly(cardLocalId);
+            final Board loadedBoard = dataBaseAdapter.getBoardByLocalCardIdDirectly(requestedCardLocalId);
             final Stack stack = dataBaseAdapter.getStackByLocalIdDirectly(fullCard.getCard().getStackId());
-            runOnUiThread(() -> render(fullCard, loadedAccount, loadedBoard, stack));
+            runOnUiThread(() -> {
+                if (requestId == loadRequestId) {
+                    render(fullCard, loadedAccount, loadedBoard, stack);
+                }
+            });
         });
     }
 
