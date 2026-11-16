@@ -73,7 +73,7 @@ jobs:
           values = []
           refs = subprocess.check_output(['git', 'for-each-ref', '--format=%(refname:strip=3)', 'refs/tags/upstream'], text=True).splitlines()
           for tag in refs:
-              if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', tag):
+              if not re.fullmatch(r'v?[0-9]+\.[0-9]+\.[0-9]+', tag):
                   continue
               version_code = ''
               try:
